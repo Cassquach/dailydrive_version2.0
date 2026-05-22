@@ -1,0 +1,103 @@
+# =============================================================================
+# Daily Drive Configuration
+# =============================================================================
+
+# --- Spotify App Credentials ---
+spotify:
+  client_id: "78bc4427aa1d4154a1cc6e416f8e632e"
+  client_secret: "e5e227da9a4a4fe79882033319fbe1f7"
+  redirect_uri: "http://127.0.0.1:8888/callback"
+
+# --- Your Playlist ---
+playlist_id: "2a3JeTVCXFBkNhc4gtbec5"
+
+# --- Podcasts ---
+# Only fields the script supports: name, id, episodes, position
+# episodes: 1 on every show to prevent doubles (e.g. Short Wave issue)
+# position: first is reserved for NPR News Now only
+#
+# Shows are ordered by priority — the script works through them in order,
+# so put your most important shows first.
+podcasts:
+  - name: "NPR News Now"
+    id: "6BRSvIBNQnB68GuoXJRCnQ"
+    episodes: 1
+    position: first       # Always plays first
+
+  - name: "What a Day"
+    id: "7Is1Lb2OFtpUUeWZRfBOF9"
+    episodes: 1
+
+  - name: "Today Explained"
+    id: "3pXx5SXzXwJxnf4A5pWN2A"
+    episodes: 1
+
+  - name: "Its Been a Minute"
+    id: "6gcw7EF2i70vXXXJnhBNgA"
+    episodes: 1
+
+  - name: "What Next"
+    id: "7IT5Yn1zGDH1cYXh38dned"
+    episodes: 1
+
+  - name: "Short Wave"
+    id: "2rTT1klKUoQNuaW2Ah19Pa"
+    episodes: 1           # Explicit 1 to prevent the double-episode bug
+
+  - name: "Science Vs."
+    id: "5eXZwvvxt3K2dxha3BSaAe"
+    episodes: 1
+
+# --- Music Sources ---
+music:
+  top_tracks:
+    enabled: true
+    time_range: "short_term"
+    count: 10
+
+  top_tracks_medium:
+    enabled: true
+    time_range: "medium_term"
+    count: 10
+
+  top_tracks_long:
+    enabled: true
+    time_range: "long_term"
+    count: 10
+
+  # --- Recommendations API ---
+  # Uses your actual listening behavior as seeds for personalized discovery.
+  # Much more accurate than genre search — this is how Spotify's Daily Mix works.
+  # Seeds must total 5 or fewer (tracks + artists + genres combined).
+  recommendations:
+    enabled: true
+    seeds:
+      tracks: 2              # Seeded from your top tracks
+      artists: 2             # Seeded from your top artists
+      genres: 1              # Auto-detected from your top artists' genre tags
+    count: 15
+    # Optional: filter by audio features to keep the vibe right for a commute
+    filters:
+      min_energy: 0.4        # Not too sleepy
+      max_energy: 0.85       # Not too intense
+      min_valence: 0.3       # Avoid very melancholic tracks
+
+  # Genre search kept as a fallback — the recommendations API covers this better
+  genres:
+    - alternative
+    - j-pop
+    - lo-fi
+
+  total_songs: 30
+  shuffle: true
+
+# --- Mix Pattern ---
+# MMPMMMP = 2 songs, 1 podcast, 3 songs, 1 podcast, repeat
+mix_pattern: "MMPMMMP"
+
+# --- Schedule ---
+schedule:
+  times:
+    - "05:00"
+    - "15:00"
+  timezone: "America/New_York"
