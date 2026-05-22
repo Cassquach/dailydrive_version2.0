@@ -327,6 +327,138 @@ async function fetchGenreTracks(spotifyApi, genres, count) {
 }
 
 /**
+ * Fetches personalized track recommendations using Spotify's Recommendations API.
+ * This is how Spotify's own Daily Mix works — it seeds recommendations from your
+ * actual top tracks and top artists, producing results far more tailored than
+ * a generic genre search.
+ *
+ * Seeds are pulled fresh each run from your top tracks/artists so recommendations
+ * stay relevant as your taste evolves.
+ *
+ * Config shape (in config.yaml under music.recommendations):
+ *   recommendations:
+ *     enabled: true
+ *     seeds:
+ *       tracks: 2       # how many of your top tracks to use as seeds (max combined = 5)
+ *       artists: 2      # how many of your top artists to use as seeds
+ *       genres: 1       # how many of your top genres to use as seeds
+ *     count: 15         # how many recommended tracks to fetch
+ *     filters:          # optional Spotify audio feature filters
+ *       min_energy: 0.4
+ *       max_energy: 0.85
+ *       min_valence: 0.3
+ */
+async function fetchRecommendedTracks(spotifyApi, recConfig, count) {
+  console.log("🎵 Fetching personalized recommendations...");
+
+  const seedConfig = recConfig.seeds || {};
+  const numSeedTracks  = seedConfig.tracks  || 2;
+  const numSeedArtists = seedConfig.artists || 2;
+  const numSeedGenres  = seedConfig.genres  || 1;
+
+  // Total seeds must be <= 5 (Spotify API hard limit)
+  const totalSeeds = numSeedTracks + numSeedArtists + numSeedGenres;
+  if (totalSeeds > 5) {
+    console.warn(`    ⚠️  recommendations.seeds total is ${totalSeeds} — Spotify allows max 5. Trimming.`);
+  }
+
+  try {
+    const accessToken = spotifyApi.getAccessToken();
+
+    // --- Gather seed track IDs from your top tracks ---
+    const seedTrackIds = [];
+    if (numSeedTracks > 0) {
+      const topTracksData = await spotifyApi.getMyTopTracks({
+        limit: numSeedTracks,
+        time_range: "short_term",
+      });
+      for (const t of topTracksData.body.items) {
+        seedTrackIds.push(t.id);
+      }
+    }
+
+    // --- Gather seed artist IDs from your top artists ---
+    const seedArtistIds = [];
+    if (numSeedArtists > 0) {
+      const topArtistsData = await spotifyApi.getMyTopArtists({
+        limit: numSeedArtists,
+        time_range: "short_term",
+      });
+      for (const a of topArtistsData.body.items) {
+        seedArtistIds.push(a.id);
+      }
+    }
+
+    // --- Gather seed genres from your top artists' genre tags ---
+    const seedGenres = [];
+    if (numSeedGenres > 0 && seedArtistIds.length > 0) {
+      // Re-fetch top artists with more results to get richer genre data
+      const genreArtistsData = await spotifyApi.getMyTopArtists({
+        limit: 10,
+        time_range: "short_term",
+      });
+      // Collect all genre tags, count frequency, pick the most common ones
+      const genreCount = {};
+      for (const artist of genreArtistsData.body.items) {
+        for (const genre of (artist.genres || [])) {
+          genreCount[genre] = (genreCount[genre] || 0) + 1;
+        }
+      }
+      const sortedGenres = Object.entries(genreCount)
+        .sort((a, b) => b[1] - a[1])
+        .map(([genre]) => genre);
+      seedGenres.push(...sortedGenres.slice(0, numSeedGenres));
+    }
+
+    console.log(`    Seeds — tracks: [${seedTrackIds.join(", ")}]`);
+    console.log(`    Seeds — artists: [${seedArtistIds.join(", ")}]`);
+    console.log(`    Seeds — genres: [${seedGenres.join(", ")}]`);
+
+    // --- Build the Recommendations API query ---
+    const params = new URLSearchParams({
+      limit: Math.min(count, 100),
+      market: "US",
+    });
+
+    if (seedTrackIds.length)  params.set("seed_tracks",  seedTrackIds.join(","));
+    if (seedArtistIds.length) params.set("seed_artists", seedArtistIds.join(","));
+    if (seedGenres.length)    params.set("seed_genres",  seedGenres.join(","));
+
+    // Apply optional audio feature filters from config
+    const filters = recConfig.filters || {};
+    for (const [key, value] of Object.entries(filters)) {
+      params.set(key, value);
+    }
+
+    const res = await fetch(
+      `https://api.spotify.com/v1/recommendations?${params.toString()}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`HTTP ${res.status}: ${errText}`);
+    }
+
+    const data = await res.json();
+    const tracks = (data.tracks || []).map((track) => ({
+      uri: track.uri,
+      name: track.name,
+      artist: track.artists?.map((a) => a.name).join(", ") || "Unknown",
+      type: "track",
+    }));
+
+    console.log(`    Found ${tracks.length} recommended tracks`);
+    return shuffle(tracks);
+
+  } catch (err) {
+    // Recommendations failing shouldn't crash the whole script
+    console.error(`    ⚠️  Recommendations failed: ${err.message}`);
+    return [];
+  }
+}
+
+/**
  * Interleaves podcast episodes and music tracks according to a pattern string.
  *
  * Pattern example: "PMMM" means: 1 podcast, 3 music, 1 podcast, 3 music, ...
@@ -558,7 +690,7 @@ async function main() {
 }
 
 /**
- * Fetches all music tracks (familiar + discovery) based on config.
+ * Fetches all music tracks (familiar + discovery + recommendations) based on config.
  * Used by full refresh mode, and as a fallback for podcast-only mode
  * when no saved tracks exist yet.
  */
@@ -566,26 +698,57 @@ async function fetchAllMusicTracks(spotifyApi, config) {
   const musicConfig = config.music || {};
   const totalSongs = musicConfig.total_songs || 15;
   const hasGenres = musicConfig.genres && musicConfig.genres.length > 0;
+  const hasRecommendations = musicConfig.recommendations && musicConfig.recommendations.enabled;
 
-  // When genres are configured, split total_songs 50/50:
-  //   - Half "familiar" (your top tracks + source playlists)
-  //   - Half "discovery" (genre search results — new music for you)
-  const familiarCount = hasGenres ? Math.ceil(totalSongs / 2) : totalSongs;
-  const discoveryCount = hasGenres ? totalSongs - familiarCount : 0;
+  // Decide how to split the total_songs budget across sources:
+  //   - If recommendations are on, give them a dedicated slice (~40% by default)
+  //   - If genres are on, split the remainder 50/50 familiar vs discovery
+  //   - Otherwise, everything goes to familiar tracks
+  let recCount = 0;
+  let remainingCount = totalSongs;
 
-  // Fetch familiar tracks (your top tracks + any source playlists)
+  if (hasRecommendations) {
+    recCount = musicConfig.recommendations.count || Math.floor(totalSongs * 0.4);
+    remainingCount = totalSongs - recCount;
+  }
+
+  const familiarCount = hasGenres ? Math.ceil(remainingCount / 2) : remainingCount;
+  const discoveryCount = hasGenres ? remainingCount - familiarCount : 0;
+
+  // --- Fetch familiar tracks (top tracks + source playlists) ---
   const familiarConfig = { ...musicConfig, total_songs: familiarCount };
   let tracks = await fetchMusicTracks(spotifyApi, familiarConfig);
 
-  // Fetch discovery tracks (genre-based search for new music)
+  // --- Fetch genre discovery tracks ---
   if (hasGenres && discoveryCount > 0) {
     const genreTracks = await fetchGenreTracks(spotifyApi, musicConfig.genres, discoveryCount);
-
-    // Remove any genre tracks that duplicate songs already in the familiar set
     const familiarUris = new Set(tracks.map((t) => t.uri));
     const newGenreTracks = genreTracks.filter((t) => !familiarUris.has(t.uri));
     tracks = [...tracks, ...newGenreTracks.slice(0, discoveryCount)];
-    console.log(`🎵 Music mix: ${familiarCount} familiar + ${newGenreTracks.slice(0, discoveryCount).length} discovery = ${tracks.length} total`);
+  }
+
+  // --- Fetch recommended tracks (personalized, seeded from your taste) ---
+  if (hasRecommendations && recCount > 0) {
+    const recTracks = await fetchRecommendedTracks(
+      spotifyApi,
+      musicConfig.recommendations,
+      recCount
+    );
+    // Deduplicate against what we already have
+    const existingUris = new Set(tracks.map((t) => t.uri));
+    const newRecTracks = recTracks.filter((t) => !existingUris.has(t.uri));
+    tracks = [...tracks, ...newRecTracks.slice(0, recCount)];
+  }
+
+  // Final shuffle and trim to total
+  if (musicConfig.shuffle !== false) {
+    tracks = shuffle(tracks);
+  }
+  tracks = tracks.slice(0, totalSongs);
+
+  console.log(`🎵 Music mix: ${tracks.length} total tracks`);
+  if (hasRecommendations) {
+    console.log(`   (familiar + genre discovery + ${recCount} personalized recommendations)`);
   }
 
   return tracks;
